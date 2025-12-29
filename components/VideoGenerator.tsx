@@ -99,12 +99,22 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d', { alpha: false })!;
     
+    // AudioContextの初期化
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 44100 });
     audioCtxRef.current = audioCtx;
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
     
+    // ブラウザの制限を解除するために一度Resume
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+    
+    // 録画用ストリームの作成
     const dest = audioCtx.createMediaStreamDestination();
+    const masterGain = audioCtx.createGain();
+    masterGain.connect(dest);
+    masterGain.connect(audioCtx.destination); // プレビュー中も音を出す
 
+    // BGMの設定
     let bgmSource: AudioBufferSourceNode | null = null;
     if (bgmBuffer) {
       bgmSource = audioCtx.createBufferSource();
@@ -113,32 +123,38 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
       const bgmGain = audioCtx.createGain();
       bgmGain.gain.value = bgmVolume;
       bgmSource.connect(bgmGain);
-      bgmGain.connect(dest);
-      bgmGain.connect(audioCtx.destination);
+      bgmGain.connect(masterGain);
       bgmSource.start(0);
     }
 
     const canvasStream = canvas.captureStream(30);
-    const combinedStream = new MediaStream([...canvasStream.getTracks(), ...dest.stream.getAudioTracks()]);
+    const combinedStream = new MediaStream([
+      ...canvasStream.getTracks(),
+      ...dest.stream.getAudioTracks()
+    ]);
 
+    // WebMとして一度保存し、ブラウザで再生可能な状態にする
     const recorder = new MediaRecorder(combinedStream, { 
       mimeType: 'video/webm;codecs=vp9,opus',
-      videoBitsPerSecond: 8000000 
+      videoBitsPerSecond: 5000000 
     });
     recorderRef.current = recorder;
 
     const chunks: Blob[] = [];
     recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.onstop = () => {
-      // 途中で止められた（isRecordingがfalseになった）場合はダウンロードさせない
-      if (!isRecording && chunks.length > 0) return;
-      
-      const finalBlob = new Blob(chunks, { type: 'video/mp4' });
+      if (!chunks.length) return;
+      const finalBlob = new Blob(chunks, { type: 'video/webm' });
       const videoUrl = URL.createObjectURL(finalBlob);
+      
+      // 自動ダウンロード
       const a = document.createElement('a');
       a.href = videoUrl;
-      a.download = `HistoryShorts_${script.topicName}.mp4`;
+      a.download = `Final_Show_${script.topicName}.webm`;
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
+      
       onFinish(videoUrl);
     };
 
@@ -149,14 +165,14 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
     const playNextScene = () => {
       if (!isRecording) return;
       sceneIdx++;
+      
       if (sceneIdx >= script.scenes.length) {
+        // 終了処理
         setTimeout(() => {
           if (recorder.state !== 'inactive') recorder.stop();
           bgmSource?.stop();
-          if (audioCtx.state !== 'closed') {
-            audioCtx.close().catch(console.error);
-          }
-        }, 1000);
+          if (audioCtx.state !== 'closed') audioCtx.close().catch(console.error);
+        }, 1500);
         return;
       }
 
@@ -165,11 +181,11 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
       const dur = (scene.duration || 5) * 1000;
       const start = performance.now();
 
+      // ナレーションの再生
       if (scene.audioBuffer) {
         const s = audioCtx.createBufferSource();
         s.buffer = scene.audioBuffer;
-        s.connect(dest);
-        s.connect(audioCtx.destination);
+        s.connect(masterGain);
         s.start(0);
       }
 
@@ -180,22 +196,25 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
 
         ctx.fillStyle = 'black';
         ctx.fillRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
-        const z = 1.0 + (p * 0.1);
+        const z = 1.0 + (p * 0.12); // 少しズーム
         drawImageCover(ctx, img, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT, z);
 
-        ctx.fillStyle = 'rgba(0,0,0,0.85)';
-        ctx.fillRect(0, VIDEO_HEIGHT * 0.75, VIDEO_WIDTH, VIDEO_HEIGHT * 0.25);
+        // テロップ背景
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, VIDEO_HEIGHT * 0.78, VIDEO_WIDTH, VIDEO_HEIGHT * 0.22);
 
-        ctx.font = '900 48px sans-serif';
+        // テロップ描画
+        ctx.font = '900 46px "Hiragino Sans", "Meiryo", sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillStyle = '#FF69B4'; 
-        ctx.strokeStyle = 'black';
-        ctx.lineWidth = 10;
+        ctx.fillStyle = '#FFFFFF'; 
+        ctx.strokeStyle = '#FF1493'; // オネエピンクの縁取り
+        ctx.lineWidth = 12;
+        ctx.lineJoin = 'round';
         
         const cleaned = cleanText(scene.narrationText);
-        const lines = wrapText(ctx, cleaned, VIDEO_WIDTH - 120);
+        const lines = wrapText(ctx, cleaned, VIDEO_WIDTH - 100);
         lines.forEach((line, i) => {
-          const y = VIDEO_HEIGHT * 0.84 + (i * 72);
+          const y = VIDEO_HEIGHT * 0.86 + (i * 70);
           ctx.strokeText(line, VIDEO_WIDTH / 2, y);
           ctx.fillText(line, VIDEO_WIDTH / 2, y);
         });
@@ -206,42 +225,49 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
       animationRef.current = requestAnimationFrame(drawFrame);
     };
 
+    // 冒頭のタイトルカード表示
     const startTitleTime = performance.now();
     const drawTitleFrame = () => {
       if (!isRecording) return;
-      const p = Math.min((performance.now() - startTitleTime) / TITLE_DURATION, 1);
-      ctx.fillStyle = 'black';
+      const elapsed = performance.now() - startTitleTime;
+      const p = Math.min(elapsed / TITLE_DURATION, 1);
+      
+      ctx.fillStyle = '#0a050a';
       ctx.fillRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
       
       if (images[0]) {
-        ctx.globalAlpha = 0.4;
-        drawImageCover(ctx, images[0], 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT, 1.0);
+        ctx.globalAlpha = 0.35;
+        drawImageCover(ctx, images[0], 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT, 1.0 + p * 0.05);
         ctx.globalAlpha = 1.0;
       }
 
-      const bounce = 1.0 + Math.abs(Math.sin(p * Math.PI * 4)) * 0.05;
+      const bounce = 1.0 + Math.abs(Math.sin(p * Math.PI * 3)) * 0.03;
       ctx.save();
       ctx.translate(VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
       ctx.scale(bounce, bounce);
       
-      ctx.font = '900 80px sans-serif';
+      // メインタイトル
+      ctx.font = '900 70px sans-serif';
       ctx.textAlign = 'center';
-      ctx.strokeStyle = 'black'; ctx.lineWidth = 20; 
-      ctx.strokeText("歴史オネエ秘話", 0, -110);
-      ctx.fillStyle = '#FF1493'; ctx.fillText("歴史オネエ秘話", 0, -110);
+      ctx.strokeStyle = '#000000'; ctx.lineWidth = 18; 
+      ctx.strokeText("オネエ歴史秘話", 0, -120);
+      ctx.fillStyle = '#FF1493'; ctx.fillText("オネエ歴史秘話", 0, -120);
       
-      let fontSize = 110;
+      // テーマ名
+      let fontSize = 90;
       ctx.font = `900 ${fontSize}px sans-serif`;
-      while (ctx.measureText(script.topicName).width > VIDEO_WIDTH - 100 && fontSize > 40) {
+      while (ctx.measureText(script.topicName).width > VIDEO_WIDTH - 80 && fontSize > 35) {
         fontSize -= 5;
         ctx.font = `900 ${fontSize}px sans-serif`;
       }
-      ctx.strokeStyle = 'black'; ctx.lineWidth = 15;
+      ctx.strokeStyle = '#000000'; ctx.lineWidth = 14;
       ctx.strokeText(script.topicName, 0, 40);
-      ctx.fillStyle = 'white'; ctx.fillText(script.topicName, 0, 40);
+      ctx.fillStyle = '#FFFFFF'; ctx.fillText(script.topicName, 0, 40);
       
-      ctx.font = 'bold 50px sans-serif';
-      ctx.fillStyle = '#00FFFF'; ctx.fillText("〜地獄のショーよッ！〜", 0, 160);
+      ctx.font = 'bold 45px sans-serif';
+      ctx.fillStyle = '#00FFFF'; 
+      ctx.strokeText("〜地獄の開幕よッ！〜", 0, 180);
+      ctx.fillText("〜地獄の開幕よッ！〜", 0, 180);
       ctx.restore();
 
       if (p < 1) animationRef.current = requestAnimationFrame(drawTitleFrame);
@@ -255,7 +281,6 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
     if (isRecording && isAssetsReady) {
       run();
     } else if (!isRecording) {
-      // 録画中断時のクリーンアップ
       if (recorderRef.current && recorderRef.current.state !== 'inactive') {
         recorderRef.current.stop();
       }
@@ -274,9 +299,9 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
            style={{ height: '90%', aspectRatio: '9/16' }}>
         <canvas ref={canvasRef} width={VIDEO_WIDTH} height={VIDEO_HEIGHT} className="w-full h-full object-contain" />
         {isRecording && (
-          <div className="absolute top-10 left-10 flex items-center gap-3">
-            <div className="w-5 h-5 bg-pink-600 rounded-full animate-ping shadow-[0_0_20px_pink]"></div>
-            <span className="text-sm font-black text-white tracking-widest uppercase italic">ON AIR: DRAG SHOW</span>
+          <div className="absolute top-10 left-10 flex items-center gap-3 bg-black/50 px-4 py-2 rounded-full border border-pink-500/50">
+            <div className="w-3 h-3 bg-red-600 rounded-full animate-pulse shadow-[0_0_10px_red]"></div>
+            <span className="text-[10px] font-black text-white tracking-widest uppercase italic">LIVE MIXING...</span>
           </div>
         )}
       </div>

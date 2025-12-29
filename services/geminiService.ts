@@ -13,12 +13,13 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 5, delay = 10000, si
   } catch (error: any) {
     if (signal?.aborted || error.name === 'AbortError') throw new Error("AbortError");
 
+    const errorMessage = error.message || "";
     const isRateLimit = 
-      error.message?.includes('429') || 
+      errorMessage.includes('429') || 
       error.status === 429 || 
-      error.message?.toLowerCase().includes('resource_exhausted') ||
-      error.message?.toLowerCase().includes('quota') ||
-      error.message?.includes('limit: 0');
+      errorMessage.toLowerCase().includes('resource_exhausted') ||
+      errorMessage.toLowerCase().includes('quota') ||
+      errorMessage.includes('limit: 0');
 
     if (retries > 0 && isRateLimit) {
       console.warn(`制限に達しました。リトライします... (${retries}回目)`);
@@ -37,7 +38,7 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 5, delay = 10000, si
 
 export const generateScript = async (topic: string, numScenes: number, signal?: AbortSignal): Promise<ScriptData> => {
   return withRetry(async () => {
-    // クォータに最も優しい Flash Lite モデルを使用
+    // APIコール直前にインスタンス化して最新のAPIキーを使用
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const response = await ai.models.generateContent({
       model: 'gemini-flash-lite-latest',
@@ -79,6 +80,7 @@ export const generateScript = async (topic: string, numScenes: number, signal?: 
 
 export const generateSceneImage = async (prompt: string, style: ArtStyle, signal?: AbortSignal): Promise<string> => {
   return withRetry(async () => {
+    // APIコール直前にインスタンス化
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const stylePrompt = style === 'manga' 
       ? "Epic Japanese Manga art style, dramatic shadows, high contrast" 
@@ -103,6 +105,7 @@ export const generateSceneImage = async (prompt: string, style: ArtStyle, signal
 
 export const generateSceneAudio = async (text: string, audioCtx: AudioContext, signal?: AbortSignal): Promise<AudioBuffer> => {
   return withRetry(async () => {
+    // APIコール直前にインスタンス化
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",

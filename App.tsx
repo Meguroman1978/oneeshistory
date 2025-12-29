@@ -39,6 +39,7 @@ const App: React.FC = () => {
     const aistudio = (window as any).aistudio;
     if (aistudio) {
       await aistudio.openSelectKey();
+      // レースコンディション対策: 選択直後は成功とみなして進む
       setIsKeySetupVisible(false);
     }
   };
@@ -98,9 +99,10 @@ const App: React.FC = () => {
       for (let i = 0; i < scriptData.scenes.length; i++) {
         if (signal.aborted) return;
 
+        // クォータ対策でシーン間にウェイトを入れる
         if (i > 0) {
           await new Promise((resolve, reject) => {
-            const timer = setTimeout(resolve, 2000);
+            const timer = setTimeout(resolve, 3000); // 3秒待機
             signal.addEventListener('abort', () => {
               clearTimeout(timer);
               reject(new Error("AbortError"));
@@ -141,22 +143,27 @@ const App: React.FC = () => {
       console.error(error);
 
       const errorMessage = error.message || "";
+      // クォータ超過またはリソース不足（無料ティアの制限）の判定
       const isQuotaError = 
         errorMessage.includes('429') || 
         errorMessage.toLowerCase().includes('quota') || 
         errorMessage.includes('RESOURCE_EXHAUSTED') ||
-        errorMessage.includes('limit: 0');
+        errorMessage.includes('limit: 0') ||
+        errorMessage.includes('limit exceeded');
+      
       const isNotFoundError = errorMessage.includes('Requested entity was not found.');
 
-      if (isNotFoundError) {
-        addLog("APIキーが無効か、プロジェクトが見つからないわッ！選び直して！", 'error');
-        setIsKeySetupVisible(true);
-        setStatus(GenerationStatus.ERROR);
-        return;
-      }
-
-      if (isQuotaError) {
-        addLog("あんた、APIのクォータ制限よッ！無料枠が尽きたか制限されてるわ。有料プロジェクトのキーを使えば解決するわよ！今すぐ設定しなさい！", 'error');
+      if (isNotFoundError || isQuotaError) {
+        let msg = "あらやだ、APIの壁にぶち当たったわッ！";
+        if (errorMessage.includes('limit: 0')) {
+          msg = "あんた！そのプロジェクト、課金設定がされてないか制限されてるわッ！有料プロジェクトのAPIキーを選び直しなさい！";
+        } else if (isQuotaError) {
+          msg = "無料枠を使い切ったみたいね。有料プロジェクトのキーなら無限に生成できるわよッ！";
+        } else {
+          msg = "APIキーの設定が正しくないみたい。もう一度選び直してちょうだい！";
+        }
+        
+        addLog(msg, 'error');
         setIsKeySetupVisible(true);
         setStatus(GenerationStatus.ERROR);
         return;
@@ -176,38 +183,47 @@ const App: React.FC = () => {
 
   const isBusy = status !== GenerationStatus.IDLE && status !== GenerationStatus.COMPLETED && status !== GenerationStatus.ERROR;
 
-  // API Key selection overlay
+  // APIキー選択画面
   if (isKeySetupVisible) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 backdrop-blur-xl p-6">
         <div className="max-w-md w-full bg-gradient-to-br from-purple-900/40 to-pink-900/40 border border-pink-500/50 rounded-[3rem] p-10 text-center shadow-[0_0_100px_rgba(236,72,153,0.3)]">
-          <h2 className="text-4xl font-black bg-gradient-to-r from-pink-300 to-purple-400 bg-clip-text text-transparent italic mb-6">
-            オネエの楽屋へようこそ
+          <h2 className="text-4xl font-black bg-gradient-to-r from-pink-300 to-purple-400 bg-clip-text text-transparent italic mb-6 text-glow">
+            オネエの特別室へ
           </h2>
           <p className="text-pink-100/80 mb-8 font-bold leading-relaxed">
-            あんた、このショーを楽しみたければ<br/>自分のAPIキーを用意しなさいッ！<br/>
-            <span className="text-pink-400 font-black">※「Quota exceeded (limit: 0)」エラーが出ている場合、有料プロジェクトのAPIキーを選択する必要があるわよ！</span>
+            あんた、この動画ショーを本気で楽しみたければ<br/>
+            <span className="text-pink-400 font-black text-lg underline underline-offset-4 decoration-pink-500">「有料プロジェクト(Pay-as-you-go)」</span><br/>
+            から発行したAPIキーを用意しなさいッ！
           </p>
           <div className="space-y-4">
             <button
               onClick={handleOpenKeySelector}
-              className="w-full py-5 bg-gradient-to-r from-pink-600 to-purple-700 rounded-2xl font-black text-xl hover:scale-105 active:scale-95 transition-all shadow-xl shadow-pink-500/30"
+              className="w-full py-5 bg-gradient-to-r from-pink-600 to-purple-700 rounded-2xl font-black text-xl hover:scale-105 active:scale-95 transition-all shadow-xl shadow-pink-500/30 border border-white/20"
             >
-              自分のAPIキーを使うわッ！
+              APIキーを選択し直すわッ！
             </button>
+            <div className="pt-4 text-left bg-black/40 p-4 rounded-xl border border-white/10 text-xs text-gray-400">
+              <p className="font-bold text-pink-300 mb-2">💡 解決のヒント:</p>
+              <ul className="list-disc list-inside space-y-1">
+                <li>Google AI Studioで「Pay-as-you-go」に設定済みか確認。</li>
+                <li>「limit: 0」は、そのモデルの使用が許可されていない証拠よ。</li>
+                <li>無料枠のキーだと、画像や音声生成ですぐ制限がかかっちゃうの。</li>
+              </ul>
+            </div>
             <a
               href="https://ai.google.dev/gemini-api/docs/billing"
               target="_blank"
               rel="noopener noreferrer"
-              className="block text-xs text-purple-300 hover:text-pink-300 underline underline-offset-4 opacity-70"
+              className="block text-[10px] text-purple-300 hover:text-pink-300 underline underline-offset-4 opacity-70 mt-2"
             >
-              課金設定の仕方がわからない？（ドキュメント）
+              課金設定の公式ガイド（英語だけど読みなさい！）
             </a>
             <button
               onClick={() => setIsKeySetupVisible(false)}
-              className="block w-full text-xs text-gray-500 hover:text-white mt-4"
+              className="block w-full text-xs text-gray-600 hover:text-white mt-4 transition-colors"
             >
-              閉じる
+              今はいいわ（閉じる）
             </button>
           </div>
         </div>
@@ -312,7 +328,7 @@ const App: React.FC = () => {
           )}
         </div>
 
-        <div className="mt-4 flex-1 bg-black/40 rounded-2xl p-4 overflow-y-auto text-[10px] font-mono border border-purple-500/20">
+        <div className="mt-4 flex-1 bg-black/40 rounded-2xl p-4 overflow-y-auto text-[10px] font-mono border border-purple-500/20 scrollbar-thin">
           {logs.map((log, i) => (
             <div key={i} className={`mb-1 ${log.type === 'error' ? 'text-red-500' : log.type === 'success' ? 'text-pink-400' : 'text-gray-500'}`}>
               <span className="opacity-30">[{log.timestamp}]</span> {log.message}
@@ -321,8 +337,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Preview Area */}
-      <div className="flex-1 flex flex-col items-center justify-center bg-black/40 rounded-[3rem] border border-purple-500/10 relative overflow-hidden">
+      <div className="flex-1 flex flex-col items-center justify-center bg-black/40 rounded-[3rem] border border-purple-500/10 relative overflow-hidden shadow-inner">
         {(status === GenerationStatus.RECORDING || status === GenerationStatus.COMPLETED) && script && (
           <VideoGenerator 
             script={script} 
@@ -333,30 +348,39 @@ const App: React.FC = () => {
           />
         )}
         {status === GenerationStatus.IDLE && (
-          <div className="text-purple-900/50 text-center uppercase tracking-[0.5em] font-black">
-            <p className="text-8xl mb-4 italic">ShowTime</p>
+          <div className="text-purple-900/50 text-center uppercase tracking-[0.5em] font-black pointer-events-none">
+            <p className="text-8xl mb-4 italic text-glow-purple">ShowTime</p>
             <p className="text-sm">テーマを入力してショーを始めなさい！</p>
           </div>
         )}
         {isBusy && status !== GenerationStatus.RECORDING && (
           <div className="flex flex-col items-center gap-6">
-            <div className="w-20 h-20 border-8 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-pink-500 font-black animate-pulse uppercase tracking-widest text-lg">Preparing the Stage...</p>
-            <p className="text-xs text-purple-400 opacity-60">※クォータ制限を避けるため、ゆっくり作っているわ。</p>
+            <div className="w-20 h-20 border-8 border-pink-500 border-t-transparent rounded-full animate-spin shadow-[0_0_20px_rgba(236,72,153,0.5)]"></div>
+            <div className="text-center">
+              <p className="text-pink-500 font-black animate-pulse uppercase tracking-widest text-lg">Preparing the Stage...</p>
+              <p className="text-xs text-purple-400 opacity-60 mt-2">※クォータ制限を避けるため、ゆっくり作っているわ。</p>
+            </div>
           </div>
         )}
         {status === GenerationStatus.ERROR && !isKeySetupVisible && (
-          <div className="text-center p-10 bg-red-900/20 rounded-3xl border border-red-500/30">
+          <div className="text-center p-10 bg-red-900/20 rounded-3xl border border-red-500/30 backdrop-blur-md">
             <p className="text-red-400 font-black text-2xl mb-4 italic">あらやだ、トラブル発生よ！</p>
             <button 
               onClick={() => setIsKeySetupVisible(true)}
-              className="px-6 py-3 bg-red-600 rounded-xl font-bold hover:bg-red-500 transition-colors"
+              className="px-8 py-4 bg-red-600 rounded-2xl font-black hover:bg-red-500 transition-all active:scale-95 shadow-lg shadow-red-500/30"
             >
-              APIキーの設定を確認する
+              APIキーの設定を今すぐ直すッ！
             </button>
           </div>
         )}
       </div>
+      
+      <style>{`
+        .text-glow { text-shadow: 0 0 10px rgba(255,105,180,0.8); }
+        .text-glow-purple { text-shadow: 0 0 20px rgba(147,51,234,0.3); }
+        .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(147,51,234,0.3); border-radius: 10px; }
+      `}</style>
     </div>
   );
 };
