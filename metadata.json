@@ -1,0 +1,7 @@
+{
+  "name": "Auto History Shorts Creator",
+  "description": "A fully automated AI video generator that creates historical short-form videos with images, narration, and subtitles using Gemini, Imagen, and TTS.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
