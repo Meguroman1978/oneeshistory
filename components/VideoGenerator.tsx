@@ -1,59 +1,70 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { ScriptData } from '../types';
+import { ScriptData, AspectRatio } from '../types';
 
 interface Props {
   script: ScriptData;
+  titleAudioBuffer?: AudioBuffer | null;
   isRecording: boolean;
+  aspectRatio: AspectRatio;
   bgmBuffer: AudioBuffer | null;
   bgmVolume: number;
-  onFinish: (videoUrl: string) => void;
+  onFinish: (videoUrl: string, blob: Blob) => void;
 }
 
-const VIDEO_WIDTH = 720;
-const VIDEO_HEIGHT = 1280;
-const TITLE_DURATION = 3000;
-
-const NG_WORDS = [/死/g, /殺/g, /暗殺/g, /処刑/g, /虐殺/g, /自殺/g];
-
-const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVolume, onFinish }) => {
+const VideoGenerator: React.FC<Props> = ({ script, titleAudioBuffer, isRecording, aspectRatio, bgmBuffer, bgmVolume, onFinish }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const bgmGainRef = useRef<GainNode | null>(null);
   const [images, setImages] = useState<HTMLImageElement[]>([]);
+  const [videoElements, setVideoElements] = useState<(HTMLVideoElement | null)[]>([]);
   const [isAssetsReady, setIsAssetsReady] = useState(false);
 
-  useEffect(() => {
-    const loadImages = async () => {
-      try {
-        const loaded = await Promise.all(
-          script.scenes.map(scene => {
-            return new Promise<HTMLImageElement>((resolve, reject) => {
-              const img = new Image();
-              img.crossOrigin = "anonymous";
-              img.src = scene.imageUrl!;
-              img.onload = () => resolve(img);
-              img.onerror = () => reject(new Error("Image load failed"));
-            });
-          })
-        );
-        setImages(loaded);
-        setIsAssetsReady(true);
-      } catch (e) {
-        console.error("Asset error:", e);
-      }
-    };
-    if (script.scenes.length > 0) loadImages();
-  }, [script]);
+  const isShort = aspectRatio === '9:16';
+  const VW = isShort ? 720 : 1280;
+  const VH = isShort ? 1280 : 720;
+  const LINE_HEIGHT = isShort ? 90 : 75;
+  const TEXT_AREA_Y = VH * 0.72;
+  const SUBTITLE_BASE_Y = isShort ? VH * 0.88 : VH * 0.90; 
+  const INTRO_DURATION = titleAudioBuffer ? titleAudioBuffer.duration * 1000 + 500 : 5000; 
 
-  const cleanText = (text: string) => {
-    let result = text.replace(/\[ピー\]/g, "●●");
-    NG_WORDS.forEach(reg => {
-      result = result.replace(reg, "●●");
-    });
-    return result;
-  };
+  const POWER_WORDS_RED = ["死", "血", "殺", "絶望", "闇", "裏側", "呪", "禁断", "裏切り", "消失", "謎"];
+  const POWER_WORDS_YELLOW = ["真実", "神", "宝", "黄金", "秘密", "奇跡", "衝撃", "閲覧注意", "最後"];
+
+  useEffect(() => {
+    const loadAssets = async () => {
+      try {
+        const imgPromises = script.scenes.map(scene => {
+          return new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.src = scene.imageUrl!;
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error("Image failed"));
+          });
+        });
+        const videoPromises = script.scenes.map(scene => {
+          if (!scene.videoUrl) return Promise.resolve(null);
+          return new Promise<HTMLVideoElement>((resolve) => {
+            const v = document.createElement('video');
+            v.src = scene.videoUrl!;
+            v.crossOrigin = "anonymous";
+            v.muted = true;
+            v.loop = true;
+            v.oncanplaythrough = () => resolve(v);
+            v.load();
+          });
+        });
+        const [loadedImgs, loadedVideos] = await Promise.all([Promise.all(imgPromises), Promise.all(videoPromises)]);
+        setImages(loadedImgs);
+        setVideoElements(loadedVideos);
+        setIsAssetsReady(true);
+      } catch (e) { console.error(e); }
+    };
+    if (script.scenes.length > 0) loadAssets();
+  }, [script]);
 
   const wrapText = (ctx: CanvasRenderingContext2D, text: string, maxWidth: number) => {
     const words = text.split('');
@@ -68,242 +79,157 @@ const VideoGenerator: React.FC<Props> = ({ script, isRecording, bgmBuffer, bgmVo
     return lines;
   };
 
-  const drawImageCover = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, x: number, y: number, w: number, h: number, scale: number = 1.0) => {
-    const imgRatio = img.width / img.height;
+  const drawImageCover = (ctx: CanvasRenderingContext2D, img: HTMLImageElement | HTMLVideoElement, w: number, h: number, scale: number, blur = false) => {
+    const imgWidth = (img instanceof HTMLVideoElement) ? img.videoWidth : img.width;
+    const imgHeight = (img instanceof HTMLVideoElement) ? img.videoHeight : img.height;
+    if (imgWidth === 0 || imgHeight === 0) return;
+    const imgRatio = imgWidth / imgHeight;
     const canvasRatio = w / h;
     let sw, sh, sx, sy;
-
-    if (imgRatio > canvasRatio) {
-      sh = img.height;
-      sw = img.height * canvasRatio;
-      sx = (img.width - sw) / 2;
-      sy = 0;
-    } else {
-      sw = img.width;
-      sh = img.width / canvasRatio;
-      sx = 0;
-      sy = (img.height - sh) / 2;
-    }
-
-    const finalW = w * scale;
-    const finalH = h * scale;
-    const finalX = x + (w - finalW) / 2;
-    const finalY = y + (h - finalH) / 2;
-
-    ctx.drawImage(img, sx, sy, sw, sh, finalX, finalY, finalW, finalH);
+    if (imgRatio > canvasRatio) { sh = imgHeight; sw = imgHeight * canvasRatio; sx = (imgWidth - sw) / 2; sy = 0; }
+    else { sw = imgWidth; sh = imgWidth / canvasRatio; sx = 0; sy = (imgHeight - sh) / 2; }
+    const finalW = w * scale; const finalH = h * scale;
+    if (blur) ctx.filter = 'blur(15px) brightness(0.4)'; else ctx.filter = 'brightness(0.7)';
+    ctx.drawImage(img, sx, sy, sw, sh, (w - finalW) / 2, (h - finalH) / 2, finalW, finalH);
+    ctx.filter = 'none';
   };
 
   const run = useCallback(async () => {
-    if (!canvasRef.current || !isAssetsReady) return;
-    
+    if (!canvasRef.current || !isAssetsReady || images.length === 0) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d', { alpha: false })!;
-    
-    // AudioContextの初期化
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 44100 });
+    const audioCtx = new AudioContext({ sampleRate: 44100 });
     audioCtxRef.current = audioCtx;
-    
-    // ブラウザの制限を解除するために一度Resume
-    if (audioCtx.state === 'suspended') {
-      await audioCtx.resume();
-    }
-    
-    // 録画用ストリームの作成
     const dest = audioCtx.createMediaStreamDestination();
     const masterGain = audioCtx.createGain();
-    masterGain.connect(dest);
-    masterGain.connect(audioCtx.destination); // プレビュー中も音を出す
+    masterGain.connect(dest); masterGain.connect(audioCtx.destination);
 
-    // BGMの設定
-    let bgmSource: AudioBufferSourceNode | null = null;
+    let bgmGain: GainNode | null = null;
     if (bgmBuffer) {
-      bgmSource = audioCtx.createBufferSource();
+      const bgmSource = audioCtx.createBufferSource();
       bgmSource.buffer = bgmBuffer;
       bgmSource.loop = true;
-      const bgmGain = audioCtx.createGain();
-      bgmGain.gain.value = bgmVolume;
+      bgmGain = audioCtx.createGain();
+      bgmGain.gain.setValueAtTime(bgmVolume, audioCtx.currentTime);
       bgmSource.connect(bgmGain);
       bgmGain.connect(masterGain);
       bgmSource.start(0);
+      bgmGainRef.current = bgmGain;
     }
 
-    const canvasStream = canvas.captureStream(30);
-    const combinedStream = new MediaStream([
-      ...canvasStream.getTracks(),
-      ...dest.stream.getAudioTracks()
-    ]);
-
-    // WebMとして一度保存し、ブラウザで再生可能な状態にする
-    const recorder = new MediaRecorder(combinedStream, { 
-      mimeType: 'video/webm;codecs=vp9,opus',
-      videoBitsPerSecond: 5000000 
-    });
+    const recorder = new MediaRecorder(new MediaStream([...canvas.captureStream(30).getTracks(), ...dest.stream.getAudioTracks()]), { mimeType: 'video/webm;codecs=vp9,opus' });
     recorderRef.current = recorder;
-
     const chunks: Blob[] = [];
-    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.ondataavailable = e => chunks.push(e.data);
     recorder.onstop = () => {
-      if (!chunks.length) return;
-      const finalBlob = new Blob(chunks, { type: 'video/webm' });
-      const videoUrl = URL.createObjectURL(finalBlob);
-      
-      // 自動ダウンロード
-      const a = document.createElement('a');
-      a.href = videoUrl;
-      a.download = `Final_Show_${script.topicName}.webm`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
-      onFinish(videoUrl);
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      onFinish(URL.createObjectURL(blob), blob);
     };
-
     recorder.start();
 
-    let sceneIdx = -1;
+    const showIntro = () => {
+      if (titleAudioBuffer) {
+        const s = audioCtx.createBufferSource(); s.buffer = titleAudioBuffer; s.connect(masterGain); s.start(0);
+      }
+      return new Promise<void>(resolve => {
+        const start = performance.now();
+        const drawIntro = () => {
+          const elapsed = performance.now() - start;
+          const p = Math.min(elapsed / INTRO_DURATION, 1);
+          ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, VW, VH);
+          if (images[0]) drawImageCover(ctx, images[0], VW, VH, 1.1 - (p * 0.05), false);
+          ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          const headerP = Math.min(p * 2, 1);
+          ctx.font = `900 ${isShort ? '80px' : '64px'} "Hiragino Sans", "Meiryo", sans-serif`;
+          ctx.globalAlpha = headerP;
+          ctx.strokeStyle = 'black'; ctx.lineWidth = 20; ctx.lineJoin = 'round';
+          ctx.strokeText("オネエ歴史秘話", VW / 2, VH * 0.35);
+          ctx.fillStyle = '#ec4899'; ctx.fillText("オネエ歴史秘話", VW / 2, VH * 0.35);
+          const titleP = Math.max(0, Math.min((p - 0.1) * 2, 1));
+          if (titleP > 0) {
+            ctx.globalAlpha = titleP;
+            ctx.font = `900 ${isShort ? '74px' : '60px'} "Hiragino Sans", "Meiryo", sans-serif`;
+            const titleLines = wrapText(ctx, script.title, VW - 120);
+            titleLines.forEach((line, i) => {
+              const y = VH * 0.52 + (i * (isShort ? 100 : 80));
+              ctx.strokeStyle = 'black'; ctx.lineWidth = 15; ctx.lineJoin = 'round';
+              ctx.strokeText(line, VW / 2, y);
+              ctx.fillStyle = 'white'; ctx.fillText(line, VW / 2, y);
+            });
+          }
+          ctx.restore();
+          if (elapsed < INTRO_DURATION) animationRef.current = requestAnimationFrame(drawIntro); else resolve();
+        };
+        animationRef.current = requestAnimationFrame(drawIntro);
+      });
+    };
 
-    const playNextScene = () => {
-      if (!isRecording) return;
+    await showIntro();
+
+    let sceneIdx = -1;
+    const playNext = () => {
       sceneIdx++;
-      
       if (sceneIdx >= script.scenes.length) {
-        // 終了処理
-        setTimeout(() => {
-          if (recorder.state !== 'inactive') recorder.stop();
-          bgmSource?.stop();
-          if (audioCtx.state !== 'closed') audioCtx.close().catch(console.error);
-        }, 1500);
+        const fadeTime = 2.0; const now = audioCtx.currentTime;
+        if (bgmGainRef.current) {
+          bgmGainRef.current.gain.cancelScheduledValues(now);
+          bgmGainRef.current.gain.setValueAtTime(bgmVolume, now);
+          bgmGainRef.current.gain.linearRampToValueAtTime(0, now + fadeTime);
+        }
+        setTimeout(() => { if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop(); }, fadeTime * 1000);
         return;
       }
-
       const scene = script.scenes[sceneIdx];
-      const img = images[sceneIdx];
-      const dur = (scene.duration || 5) * 1000;
+      const img = images[sceneIdx]; const video = videoElements[sceneIdx];
+      const dur = scene.audioBuffer ? scene.audioBuffer.duration * 1000 : 5000;
       const start = performance.now();
-
-      // ナレーションの再生
-      if (scene.audioBuffer) {
-        const s = audioCtx.createBufferSource();
-        s.buffer = scene.audioBuffer;
-        s.connect(masterGain);
-        s.start(0);
+      if (scene.audioBuffer) { 
+        const s = audioCtx.createBufferSource(); s.buffer = scene.audioBuffer; s.connect(masterGain); s.start(0); 
       }
-
-      const drawFrame = () => {
-        if (!isRecording) return;
-        const elapsed = performance.now() - start;
-        const p = Math.min(elapsed / dur, 1);
-
-        ctx.fillStyle = 'black';
-        ctx.fillRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
-        const z = 1.0 + (p * 0.12); // 少しズーム
-        drawImageCover(ctx, img, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT, z);
-
-        // テロップ背景
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.fillRect(0, VIDEO_HEIGHT * 0.78, VIDEO_WIDTH, VIDEO_HEIGHT * 0.22);
-
-        // テロップ描画
-        ctx.font = '900 46px "Hiragino Sans", "Meiryo", sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillStyle = '#FFFFFF'; 
-        ctx.strokeStyle = '#FF1493'; // オネエピンクの縁取り
-        ctx.lineWidth = 12;
-        ctx.lineJoin = 'round';
-        
-        const cleaned = cleanText(scene.narrationText);
-        const lines = wrapText(ctx, cleaned, VIDEO_WIDTH - 100);
-        lines.forEach((line, i) => {
-          const y = VIDEO_HEIGHT * 0.86 + (i * 70);
-          ctx.strokeText(line, VIDEO_WIDTH / 2, y);
-          ctx.fillText(line, VIDEO_WIDTH / 2, y);
+      const draw = () => {
+        const elapsed = performance.now() - start; const p = Math.min(elapsed / dur, 1);
+        ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, VW, VH);
+        const zoom = 1.05 + Math.sin(p * Math.PI) * 0.05;
+        if (video) { video.currentTime = (elapsed / 1000) % video.duration; drawImageCover(ctx, video, VW, VH, zoom); }
+        else drawImageCover(ctx, img, VW, VH, zoom, false);
+        const grad = ctx.createLinearGradient(0, VH * 0.7, 0, VH);
+        grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(0,0,0,0.9)');
+        ctx.fillStyle = grad; ctx.fillRect(0, VH * 0.7, VW, VH * 0.3);
+        ctx.save(); ctx.font = `900 ${isShort ? '64px' : '52px'} "Hiragino Sans", "Meiryo", sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        const rawLines = wrapText(ctx, scene.displayText, VW - 120);
+        const totalTextHeight = rawLines.length * LINE_HEIGHT;
+        const maxScroll = Math.max(0, totalTextHeight - LINE_HEIGHT * 1.5);
+        const currentScrollY = p * maxScroll;
+        ctx.beginPath(); ctx.rect(0, TEXT_AREA_Y, VW, VH - TEXT_AREA_Y); ctx.clip();
+        rawLines.forEach((l, i) => {
+          const x = VW / 2; const y = SUBTITLE_BASE_Y - currentScrollY + (i * LINE_HEIGHT);
+          if (y > VH || y < TEXT_AREA_Y - LINE_HEIGHT) return;
+          ctx.strokeStyle = 'black'; ctx.lineWidth = 18; ctx.lineJoin = 'round'; ctx.strokeText(l, x, y);
+          ctx.strokeStyle = '#ec4899'; ctx.lineWidth = 8; ctx.lineJoin = 'round'; ctx.strokeText(l, x, y);
+          let color = 'white';
+          if (POWER_WORDS_RED.some(w => l.includes(w))) color = '#ff3333';
+          else if (POWER_WORDS_YELLOW.some(w => l.includes(w))) color = '#ffff00';
+          ctx.fillStyle = color; ctx.fillText(l, x, y);
         });
-
-        if (p < 1) animationRef.current = requestAnimationFrame(drawFrame);
-        else playNextScene();
+        ctx.restore();
+        if (p < 1) animationRef.current = requestAnimationFrame(draw); else playNext();
       };
-      animationRef.current = requestAnimationFrame(drawFrame);
+      animationRef.current = requestAnimationFrame(draw);
     };
+    playNext();
+  }, [isAssetsReady, images, videoElements, script, titleAudioBuffer, bgmBuffer, bgmVolume, onFinish, isShort, VW, VH, SUBTITLE_BASE_Y, LINE_HEIGHT, TEXT_AREA_Y]);
 
-    // 冒頭のタイトルカード表示
-    const startTitleTime = performance.now();
-    const drawTitleFrame = () => {
-      if (!isRecording) return;
-      const elapsed = performance.now() - startTitleTime;
-      const p = Math.min(elapsed / TITLE_DURATION, 1);
-      
-      ctx.fillStyle = '#0a050a';
-      ctx.fillRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
-      
-      if (images[0]) {
-        ctx.globalAlpha = 0.35;
-        drawImageCover(ctx, images[0], 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT, 1.0 + p * 0.05);
-        ctx.globalAlpha = 1.0;
-      }
-
-      const bounce = 1.0 + Math.abs(Math.sin(p * Math.PI * 3)) * 0.03;
-      ctx.save();
-      ctx.translate(VIDEO_WIDTH / 2, VIDEO_HEIGHT / 2);
-      ctx.scale(bounce, bounce);
-      
-      // メインタイトル
-      ctx.font = '900 70px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.strokeStyle = '#000000'; ctx.lineWidth = 18; 
-      ctx.strokeText("オネエ歴史秘話", 0, -120);
-      ctx.fillStyle = '#FF1493'; ctx.fillText("オネエ歴史秘話", 0, -120);
-      
-      // テーマ名
-      let fontSize = 90;
-      ctx.font = `900 ${fontSize}px sans-serif`;
-      while (ctx.measureText(script.topicName).width > VIDEO_WIDTH - 80 && fontSize > 35) {
-        fontSize -= 5;
-        ctx.font = `900 ${fontSize}px sans-serif`;
-      }
-      ctx.strokeStyle = '#000000'; ctx.lineWidth = 14;
-      ctx.strokeText(script.topicName, 0, 40);
-      ctx.fillStyle = '#FFFFFF'; ctx.fillText(script.topicName, 0, 40);
-      
-      ctx.font = 'bold 45px sans-serif';
-      ctx.fillStyle = '#00FFFF'; 
-      ctx.strokeText("〜地獄の開幕よッ！〜", 0, 180);
-      ctx.fillText("〜地獄の開幕よッ！〜", 0, 180);
-      ctx.restore();
-
-      if (p < 1) animationRef.current = requestAnimationFrame(drawTitleFrame);
-      else playNextScene();
-    };
-    animationRef.current = requestAnimationFrame(drawTitleFrame);
-
-  }, [isAssetsReady, images, script, bgmBuffer, bgmVolume, onFinish, isRecording]);
-
-  useEffect(() => {
-    if (isRecording && isAssetsReady) {
-      run();
-    } else if (!isRecording) {
-      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-        recorderRef.current.stop();
-      }
-      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
-        audioCtxRef.current.close().catch(console.error);
-        audioCtxRef.current = null;
-      }
-      cancelAnimationFrame(animationRef.current);
-    }
-    return () => cancelAnimationFrame(animationRef.current);
-  }, [isRecording, isAssetsReady, run]);
+  useEffect(() => { if (isRecording && isAssetsReady) run(); }, [isRecording, isAssetsReady, run]);
 
   return (
-    <div className="w-full h-full flex items-center justify-center p-6 bg-black">
-      <div className="relative shadow-[0_0_120px_rgba(255,20,147,0.3)] rounded-[4rem] overflow-hidden border-[18px] border-gray-900 bg-black" 
-           style={{ height: '90%', aspectRatio: '9/16' }}>
-        <canvas ref={canvasRef} width={VIDEO_WIDTH} height={VIDEO_HEIGHT} className="w-full h-full object-contain" />
-        {isRecording && (
-          <div className="absolute top-10 left-10 flex items-center gap-3 bg-black/50 px-4 py-2 rounded-full border border-pink-500/50">
-            <div className="w-3 h-3 bg-red-600 rounded-full animate-pulse shadow-[0_0_10px_red]"></div>
-            <span className="text-[10px] font-black text-white tracking-widest uppercase italic">LIVE MIXING...</span>
-          </div>
-        )}
+    <div className="w-full h-full flex items-center justify-center bg-black p-4">
+      <div className="relative border-[10px] border-pink-600/50 rounded-[3.5rem] overflow-hidden shadow-[0_0_150px_rgba(236,72,153,0.3)] bg-[#050505]" 
+           style={{ height: isShort ? '96%' : 'auto', width: isShort ? 'auto' : '96%', aspectRatio: isShort ? '9/16' : '16/9' }}>
+        <canvas ref={canvasRef} width={VW} height={VH} className="w-full h-full object-contain" />
+        <div className="absolute top-8 left-8 bg-red-600 px-5 py-2 rounded-full text-[10px] font-black italic animate-pulse flex items-center gap-2 shadow-lg">
+          <span className="w-2.5 h-2.5 bg-white rounded-full"></span>RECORDING
+        </div>
       </div>
     </div>
   );
